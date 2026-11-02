@@ -1,0 +1,114 @@
+[
+  {
+    "id": "TC1",
+    "ac": "AC1",
+    "type": "auto",
+    "text": "Given a valid X-Slide-Api-Key, When slide_list_clients is called, Then it returns each client's id and name, bounded by limit (default 10, max 50) and offset",
+    "tests": ["tests/test_tools.py::test_list_clients_returns_id_and_name"]
+  },
+  {
+    "id": "TC2",
+    "ac": "AC2",
+    "type": "auto",
+    "text": "Given a client_id, When slide_list_agents is called, Then each returned agent has id, display name, hostname, platform, last_seen_at, and whether its backup schedule is active or paused",
+    "tests": ["tests/test_tools.py::test_list_agents_reports_backup_schedule_state"]
+  },
+  {
+    "id": "TC3",
+    "ac": "AC3",
+    "type": "auto",
+    "text": "Given an agent_id, When slide_list_backups is called, Then each backup run has start/end time and status, and a failed run also carries an error code and message",
+    "tests": ["tests/test_tools.py::test_list_backups_surfaces_failure_detail"]
+  },
+  {
+    "id": "TC4",
+    "ac": "AC3",
+    "type": "manual",
+    "text": "Given a real Slide tenant with a backup the Slide console shows as failed, When slide_get_backup is called for it, Then the tool reports the same failed status with a matching error",
+    "steps": [
+      "Obtain a real Slide API key for a tenant with at least one failed backup run (needs a real vendor account)",
+      "Note the failing backup's id and error shown in the Slide console",
+      "Run slide_get_backup(backup_id=<that id>) against the deployed service with the real key in X-Slide-Api-Key"
+    ],
+    "expect": "Returned status is the same failure state shown in the console, and error_code/error_message are non-empty and consistent with the console",
+    "result": "untested",
+    "notes": "needs a real vendor account; not required before INT publish per mcp-track.md §2.5/§3"
+  },
+  {
+    "id": "TC5",
+    "ac": "AC4",
+    "type": "auto",
+    "text": "Given a device_id, When slide_get_device is called, Then it returns service_status, last_seen_at, storage_used_bytes and storage_total_bytes",
+    "tests": ["tests/test_tools.py::test_get_device_returns_health_fields"]
+  },
+  {
+    "id": "TC6",
+    "ac": "AC5",
+    "type": "auto",
+    "text": "Given no filter, When slide_list_alerts is called, Then only unresolved alerts are returned by default, and passing resolved=true returns resolved ones instead",
+    "tests": ["tests/test_tools.py::test_list_alerts_default_and_resolved_filter"]
+  },
+  {
+    "id": "TC7",
+    "ac": "AC5",
+    "type": "auto",
+    "text": "Given a client with zero alerts, When slide_list_alerts is called, Then the result is an empty data list, not a not_found error",
+    "tests": ["tests/test_tools.py::test_list_alerts_empty_is_not_an_error"]
+  },
+  {
+    "id": "TC8",
+    "ac": "AC6",
+    "type": "auto",
+    "text": "Given a snapshot_id, When slide_get_snapshot is called, Then it returns verify_boot_status, verify_fs_status and verify_service_status for that recovery point",
+    "tests": ["tests/test_tools.py::test_get_snapshot_returns_verification_fields"]
+  },
+  {
+    "id": "TC9",
+    "ac": "AC7",
+    "type": "auto",
+    "text": "Given a request with the X-Slide-Api-Key header absent, When any tool is called, Then the response is a structured unauthorized error naming the required header, not a 500 or an exception",
+    "tests": ["tests/test_middleware.py::test_missing_header_returns_structured_401"]
+  },
+  {
+    "id": "TC10",
+    "ac": "AC8",
+    "type": "auto",
+    "text": "Given an API key Slide's API rejects (mocked 401), When any tool is called, Then the response is a structured unauthorized error whose message does not contain the submitted key or Slide's raw response body",
+    "tests": ["tests/test_tools.py::test_upstream_401_does_not_leak_credential_or_body"]
+  },
+  {
+    "id": "TC11",
+    "ac": "AC9",
+    "type": "auto",
+    "text": "Given a mocked 51-item result set, When a list_* tool is called, Then the response returns exactly limit items plus a has_more/next_offset signal, never the full 51",
+    "tests": ["tests/test_tools.py::test_list_pagination_bounds_results"]
+  },
+  {
+    "id": "TC12",
+    "ac": "AC10",
+    "type": "auto",
+    "text": "Given Slide returns a mocked 429 and, separately, a mocked 503, When a tool is called, Then the responses are rate_limited and upstream_error respectively, both retryable true, and neither hangs or raises unhandled",
+    "tests": ["tests/test_tools.py::test_429_maps_to_rate_limited", "tests/test_tools.py::test_503_maps_to_upstream_error"]
+  },
+  {
+    "id": "TC13",
+    "ac": "AC11",
+    "type": "auto",
+    "text": "Given two concurrent requests carrying two different Slide API keys, When both call the same tool at the same time, Then each outgoing call to the mocked Slide API carries only its own request's key, never the other's",
+    "tests": ["tests/test_middleware.py::test_concurrent_requests_do_not_share_credential_context"]
+  },
+  {
+    "id": "TC14",
+    "ac": "AC1",
+    "type": "manual",
+    "text": "Given a real Slide tenant and a real MCP client, When the client runs initialize then tools/list then tools/call for a representative tool, Then the call succeeds end-to-end and the agent can pick the right tool from its description alone",
+    "steps": [
+      "Obtain a real Slide API key (needs a real vendor account)",
+      "Point a real MCP client (e.g. Claude Desktop in HTTP mode) at the deployed slide-mcp service with X-Slide-Api-Key set",
+      "Run initialize, then tools/list, then ask the agent a natural-language BCDR status question and observe which tool it calls"
+    ],
+    "expect": "initialize and tools/list succeed; the agent selects a sensible tool (e.g. slide_list_backups) from its description without being told the tool name; the tool call returns real data",
+    "result": "untested",
+    "notes": "needs a real vendor account; not required before INT publish per mcp-track.md §2.5/§3"
+  }
+]
