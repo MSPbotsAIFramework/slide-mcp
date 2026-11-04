@@ -7,14 +7,59 @@ request's own bearer token. Nothing here is cached or shared across requests (SO
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import uuid
 from typing import Any
 
 import httpx
+
+from .error_codes import map_status_to_code
 
 CONNECT_TIMEOUT_S = 5.0
 READ_TIMEOUT_S = 30.0
 MAX_RETRIES = 3
 TOTAL_BUDGET_S = 120.0
+
+logger = logging.getLogger("slide_mcp.api_client")
+
+
+def _log_call(
+    *,
+    request_id: str,
+    tool: str,
+    method: str,
+    path: str,
+    params: dict[str, Any],
+    status_code: int,
+    attempts: int,
+    duration_s: float,
+    error_code: str | None,
+) -> None:
+    """One structured line per outbound Slide request (SOP §6).
+
+    `path`/`params` only ever carry Slide resource ids and list filters (limit,
+    offset, client_id, etc.) -- never the bearer token, which lives solely in the
+    client's headers and is never threaded through here. On failure this logs our
+    own mapped `error_code`, never the raw vendor `message`/`details`.
+    """
+    record = {
+        "event": "slide_api_call",
+        "request_id": request_id,
+        "tool": tool,
+        "method": method,
+        "path": path,
+        "params": params,
+        "status_code": status_code,
+        "attempts": attempts,
+        "duration_ms": round(duration_s * 1000, 1),
+        "error_code": error_code,
+    }
+    line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    if error_code is not None:
+        logger.warning(line)
+    else:
+        logger.info(line)
 
 
 class SlideAPIError(Exception):
@@ -40,12 +85,16 @@ class SlideClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _request(self, method: str, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    async def _request(
+        self, method: str, path: str, *, tool: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         params = {k: v for k, v in (params or {}).items() if v is not None}
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + TOTAL_BUDGET_S
+        started = loop.time()
+        deadline = started + TOTAL_BUDGET_S
         attempt = 0
         last_exc: Exception | None = None
+        request_id = uuid.uuid4().hex[:12]
 
         while True:
             attempt += 1
@@ -54,11 +103,33 @@ class SlideClient:
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TransportError) as exc:
                 last_exc = exc
                 if attempt > MAX_RETRIES or loop.time() >= deadline:
+                    _log_call(
+                        request_id=request_id,
+                        tool=tool,
+                        method=method,
+                        path=path,
+                        params=params,
+                        status_code=0,
+                        attempts=attempt,
+                        duration_s=loop.time() - started,
+                        error_code="upstream_error",
+                    )
                     raise SlideAPIError(0, ["upstream_unreachable"], f"Could not reach Slide API: {exc}") from exc
                 await asyncio.sleep(min(2 ** (attempt - 1), max(0.0, deadline - loop.time())))
                 continue
 
             if resp.status_code < 400:
+                _log_call(
+                    request_id=request_id,
+                    tool=tool,
+                    method=method,
+                    path=path,
+                    params=params,
+                    status_code=resp.status_code,
+                    attempts=attempt,
+                    duration_s=loop.time() - started,
+                    error_code=None,
+                )
                 if resp.status_code == 204 or not resp.content:
                     return {}
                 return resp.json()
@@ -74,6 +145,17 @@ class SlideClient:
                     continue
 
             codes, message = _parse_error_body(resp)
+            _log_call(
+                request_id=request_id,
+                tool=tool,
+                method=method,
+                path=path,
+                params=params,
+                status_code=resp.status_code,
+                attempts=attempt,
+                duration_s=loop.time() - started,
+                error_code=map_status_to_code(resp.status_code),
+            )
             raise SlideAPIError(resp.status_code, codes, message)
 
         # Unreachable, but keeps type checkers happy if the loop above is ever restructured.
@@ -81,25 +163,33 @@ class SlideClient:
 
     # -- Clients --------------------------------------------------------------
     async def list_clients(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return await self._request("GET", "/v1/client", params={"limit": limit, "offset": offset})
+        return await self._request(
+            "GET", "/v1/client", tool="slide_list_clients", params={"limit": limit, "offset": offset}
+        )
 
     # -- Agents -----------------------------------------------------------------
     async def list_agents(self, *, client_id: str | None, limit: int, offset: int) -> dict[str, Any]:
         return await self._request(
-            "GET", "/v1/agent", params={"client_id": client_id, "limit": limit, "offset": offset}
+            "GET",
+            "/v1/agent",
+            tool="slide_list_agents",
+            params={"client_id": client_id, "limit": limit, "offset": offset},
         )
 
     async def get_agent(self, agent_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/agent/{agent_id}")
+        return await self._request("GET", f"/v1/agent/{agent_id}", tool="slide_get_agent")
 
     # -- Devices ------------------------------------------------------------
     async def list_devices(self, *, client_id: str | None, limit: int, offset: int) -> dict[str, Any]:
         return await self._request(
-            "GET", "/v1/device", params={"client_id": client_id, "limit": limit, "offset": offset}
+            "GET",
+            "/v1/device",
+            tool="slide_list_devices",
+            params={"client_id": client_id, "limit": limit, "offset": offset},
         )
 
     async def get_device(self, device_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/device/{device_id}")
+        return await self._request("GET", f"/v1/device/{device_id}", tool="slide_get_device")
 
     # -- Backups ------------------------------------------------------------
     async def list_backups(
@@ -114,6 +204,7 @@ class SlideClient:
         return await self._request(
             "GET",
             "/v1/backup",
+            tool="slide_list_backups",
             params={
                 "agent_id": agent_id,
                 "device_id": device_id,
@@ -124,16 +215,19 @@ class SlideClient:
         )
 
     async def get_backup(self, backup_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/backup/{backup_id}")
+        return await self._request("GET", f"/v1/backup/{backup_id}", tool="slide_get_backup")
 
     # -- Snapshots ----------------------------------------------------------
     async def list_snapshots(self, *, agent_id: str | None, limit: int, offset: int) -> dict[str, Any]:
         return await self._request(
-            "GET", "/v1/snapshot", params={"agent_id": agent_id, "limit": limit, "offset": offset}
+            "GET",
+            "/v1/snapshot",
+            tool="slide_list_snapshots",
+            params={"agent_id": agent_id, "limit": limit, "offset": offset},
         )
 
     async def get_snapshot(self, snapshot_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/snapshot/{snapshot_id}")
+        return await self._request("GET", f"/v1/snapshot/{snapshot_id}", tool="slide_get_snapshot")
 
     # -- Alerts ---------------------------------------------------------------
     async def list_alerts(
@@ -142,15 +236,18 @@ class SlideClient:
         return await self._request(
             "GET",
             "/v1/alert",
+            tool="slide_list_alerts",
             params={"agent_id": agent_id, "resolved": resolved, "limit": limit, "offset": offset},
         )
 
     async def get_alert(self, alert_id: str) -> dict[str, Any]:
-        return await self._request("GET", f"/v1/alert/{alert_id}")
+        return await self._request("GET", f"/v1/alert/{alert_id}", tool="slide_get_alert")
 
     # -- Audit ----------------------------------------------------------------
     async def list_audit_logs(self, *, limit: int, offset: int) -> dict[str, Any]:
-        return await self._request("GET", "/v1/audit", params={"limit": limit, "offset": offset})
+        return await self._request(
+            "GET", "/v1/audit", tool="slide_list_audit_logs", params={"limit": limit, "offset": offset}
+        )
 
 
 def _parse_retry_after(value: str | None) -> float | None:

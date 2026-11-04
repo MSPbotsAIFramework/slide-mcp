@@ -10,15 +10,7 @@ from __future__ import annotations
 import json
 
 from .api_client import SlideAPIError
-
-ERROR_CODE_BY_STATUS = {
-    400: "invalid_argument",
-    401: "unauthorized",
-    403: "unauthorized",
-    404: "not_found",
-    422: "invalid_argument",
-    429: "rate_limited",
-}
+from .error_codes import map_status_to_code
 
 RETRYABLE_CODES = {"rate_limited", "upstream_error"}
 
@@ -36,8 +28,6 @@ def not_configured(message: str) -> str:
 
 
 def from_slide_error(exc: SlideAPIError) -> str:
-    code = ERROR_CODE_BY_STATUS.get(exc.status_code, "upstream_error")
-    if exc.status_code == 0 or exc.status_code >= 500:
-        code = "upstream_error"
+    code = map_status_to_code(exc.status_code)
     message = f"Slide API returned {', '.join(exc.codes) or exc.status_code}"
     return envelope(code, message)
