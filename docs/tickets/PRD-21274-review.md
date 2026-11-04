@@ -1,5 +1,7 @@
 # PRD-21274 · Code review
 
+Status: frozen @ 69b9ef6
+
 ## Round 1 · 2026-11-04 · reviewed dev/PRD-21274 @ 8790093 (base main @ 415bfed)
 
 Verdict: changes requested
@@ -23,3 +25,36 @@ Verdict: changes requested
    - Chinese-character scan (`grep -rnP '[\x{4e00}-\x{9fff}]' --exclude-dir=.git --exclude-dir=.venv .`): only hit is the Chinese SOP-section-name quote already inside this frozen review doc's Round 1 finding text (not `src/`, not introduced by this fix) — left untouched since the Findings section is the reviewer's record, not mine to edit.
    - `gitleaks`: not installed on this machine (same as the original Self-test); fell back to the same `git log -p | grep -Ei '(token|secret|api[_-]?key|password|bearer)\s*[=:]'` scan — no real credential found, only variable names and the pre-existing `sk_super_secret_value` test fixture (now also reused, unmodified in spirit, by the new negative-leak assertion in `test_logging.py`).
    - README Connector section and `.gitignore`/`.dockerignore`: untouched by this fix, no re-check needed.
+
+## Round 2 · 2026-11-04 · reviewed dev/PRD-21274 @ 69b9ef6 (base main @ 415bfed)
+
+Verdict: approved
+
+### Round 1 fix verification
+
+Round 1's only must-fix (finding 1, no structured logging) is resolved. Verified independently, not taken on the Fixes section's word:
+
+- `src/slide_mcp/api_client.py:88-96` — `_request` now takes `tool` as a required keyword-only argument and calls `_log_call` (`api_client.py:26-61`) on every exit path: the retry-exhausted/unreachable branch (`status_code=0, error_code="upstream_error"`), the `< 400` success branch (`error_code=None`, INFO), and the `>= 400` error branch (`error_code=map_status_to_code(...)`, WARNING). All three paths through the request loop are covered, not just the happy path.
+- All 12 call sites into `_request` (one per tool-backing method, `api_client.py:166-249`) now pass an explicit `tool=` string that matches the corresponding MCP tool name 1:1 (`grep -c '_request(' src/slide_mcp/api_client.py` → 13 matches: 1 definition + 12 call sites, matching the 12-tool count). No call site was missed.
+- Credential safety: `SlideClient.__init__` (`api_client.py:78-83`) puts the bearer token straight into `httpx.AsyncClient(headers=...)`; the token is never a parameter of `_request` or `_log_call`, so there is no code path by which it could reach the log line. `params` only ever carries list filters / ids built by the tool layer (`limit`, `offset`, `client_id`, etc.). Confirmed by running `tests/test_logging.py::test_failed_call_logs_mapped_error_code_never_the_credential` myself (not just reading it): it plants a secret token and the raw vendor message `"no such agent"` in the mocked 404 body and asserts neither string appears in the log record — passes.
+- `src/slide_mcp/error_codes.py` (new) is the only place `_ERROR_CODE_BY_STATUS` is defined; `errors.py` now imports `map_status_to_code` from it (`grep -rn "ERROR_CODE_BY_STATUS" --include=*.py .` → zero hits outside `error_codes.py`, so there is no second copy left to drift from the log line's mapping). `errors.from_slide_error` and `_log_call`'s `error_code` are guaranteed to agree for the same status.
+- `src/slide_mcp/__main__.py:16` adds `logging.basicConfig(level=logging.INFO, format="%(message)s")` before `uvicorn.run(...)` — without this the plain `logging.getLogger("slide_mcp.api_client")` calls would be dropped (uvicorn's `log_level="info"` only configures uvicorn's own loggers). Placement (before `uvicorn.run`, which blocks) is correct.
+
+No residual gap: the fix covers success, HTTP error, and unreachable-upstream paths, for every tool, without logging the credential or the raw vendor message.
+
+### New diff since Round 1 (`8e2524f...69b9ef6`)
+
+Reviewed the full diff (`api_client.py`, new `error_codes.py`, `errors.py`, `__main__.py`, new `tests/test_logging.py`, plus this review doc's own Fixes section). No new must-fix:
+
+- The refactor that extracts `error_codes.py` is a pure move (no behavior change) — `errors.from_slide_error` produces the same codes as before (`400/422→invalid_argument`, `401/403→unauthorized`, `404→not_found`, `429→rate_limited`, `0`/`>=500`/anything else→`upstream_error`), confirmed by reading both the old and new mapping side by side.
+- `tests/test_logging.py`'s two new tests exercise the success path and the failure path independently, assert on the parsed JSON structure (not just "a log line exists"), and the negative-leak assertion checks both the secret token and the raw vendor message string — this is the kind of test that would actually catch a regression, not a test that only proves itself passes.
+- Full gate re-run on this reviewer's machine (not only the dev leg's report): `uv run pytest -q` → **16 passed**, 0 failed, matching the `[DEV]` stub's claim exactly. Chinese-character scan clean outside the pre-existing quoted SOP-section-name inside this review doc's own frozen Round 1 finding text (not `src/`, not a new introduction). README Connector section (`README.md:16-86`) is byte-for-byte identical to `~/.claude/skills/vendor-mcp-development/reference/readme-connector-section.md` (`diff` exit 0) — unchanged since Round 1, where it was also found compliant.
+- `origin/main` is still `415bfed` (unchanged since the branch was cut), so no base-sync was needed before this round either, and none is needed before merging.
+
+### Suggestions
+
+None beyond what Round 1 already covered.
+
+### Conclusion
+
+Both rounds considered, the connector meets the MCP review bar (`legs/review.md` R3, `references/mcp-track.md` §4.3): credentials are request-scoped and never logged; tool names/params/errors are structured and consistent; tests cover the fix; README Connector section matches the template; no Chinese outside the frozen reviewer note. Proceeding to merge into `main`, INT registration (first-ever for this vendor, `mcppub register`), and the connector wiki.
